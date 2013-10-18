@@ -11,7 +11,7 @@ class Request {
     public $get = array();
     public $post = array();
     public $cookies = array();
-    public function __construct( $socket ) {
+    public function __construct($socket) {
         $this->socket = $socket;
         stream_set_blocking($this->socket, 1);
         $this->_read();
@@ -28,6 +28,9 @@ class Request {
         if ( empty($this->state) ) {
             $header = explode(' ', array_shift($data));
             $this->method = strtoupper($header[0]);
+            if ( empty($header[1]) ) {
+              throw new \Exception('Bad HTTP protocol');
+            }
             $header[1] = explode('?', $header[1], 2);
             $this->url = $header[1][0];
             if (!empty($header[1][1]) )  {
@@ -85,7 +88,11 @@ class Request {
     }
     public function reply($message) {
         if (DEBUG) echo "(debug) Sending :\n-->>$message<<--\n\n";
-        stream_socket_sendto($this->socket, $message);
+        if (!empty($this->socket) && !feof($this->socket)) {
+          if ( !stream_socket_sendto($this->socket, $message) ) {
+            $this->close();
+          }
+        }
         return $this;
     }
     public function _error($buffer, $error) {
