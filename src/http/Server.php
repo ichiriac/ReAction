@@ -3,54 +3,57 @@ namespace http;
 require_once __DIR__ . '/Request.php';
 require_once __DIR__ . '/Response.php';
 defined('MAX_THREADS') or define('MAX_THREADS', 100);
+defined('MAX_INVOKE') or define('MAX_INVOKE', 100);
 defined('DEBUG') or define('DEBUG', false);
 /**
  * Defines the server class
  */
 class Server {
     public static $events;
+    private $port;
+    private $hostname;
+    private $app;
     private $socket;
-    private $event;
+    private $requests = array();
     private $threads = array();
     /**
      * Initialize a new HTTP server, yeah !
      */
     public function __construct($app) {
+        $this->app = $app;
+        $server = $this;
+        register_shutdown_function(function() use($server) {
+          $server->run();
+        });
+    }
+    
+    /** @trick **/
+    public function run() {
+        $this->threads = array();
         for($i = 0; $i < MAX_THREADS; $i++) {
-            $this->threads[] = new ThreadRunner($app);
+            $this->threads[] = new ThreadRunner();
+        }
+        $dsn = 'tcp://'.$this->hostname.':'.$this->port;
+        $this->socket = stream_socket_server($dsn);
+        if ( !$this->socket ) {
+            throw new \Exception(
+                "Could not start server at $dsn\nCaused by : $errstr\n"
+            );
+        }
+        echo "(i) Starting the server ($dsn)...\n";
+        while(true) {
+            if(($client = stream_socket_accept($this->socket)) !== false) {
+                $this->accept($client);
+            }
+            usleep(1000);
         }
     }
     /**
      * Starts to listen
      */
     public function listen($port = '80', $hostname = '0.0.0.0') {
-        if ( !empty($this->socket) || !empty($this->event) ) {
-            throw new \LogicException(
-                'The server is already running'
-            );
-        }
-        $dsn = 'tcp://'.$hostname.':'.$port;
-        $this->socket = stream_socket_server(
-            $dsn,
-            $errno, $errstr
-        );
-        if ( !$this->socket  ) {
-            throw new \Exception(
-                "Could not start server at $dsn\nCaused by : $errstr\n"
-            );
-        }
-        echo "(i) Starting the server ($dsn)...\n";
-        stream_set_blocking($this->socket, 0);
-        $this->event =event_new();
-        event_set(
-            $this->event
-            , $this->socket
-            , EV_READ | EV_PERSIST
-            , array($this, '_accept')
-            , self::$events
-        );
-        event_base_set($this->event, self::$events);
-        event_add($this->event);
+        $this->port = $port;
+        $this->hostname = $hostname;
         return $this;
     }
     /**
@@ -67,22 +70,40 @@ class Server {
     /**
      * Intercepts a new request
      */
-    public function _accept() {
+    private function accept($socket) {
         if (DEBUG) echo "(debug) Receive request\n";
-        $socket = stream_socket_accept($this->socket);
         $try = 0;
         while($try < 200) {
-            foreach($this->threads as $thread) {
+            foreach($this->threads as $id => &$thread) {
                 if ( $thread->isWaiting() ) {
-                    if ( $thread->receive($socket) ) {
-                        return true;
+                    if (DEBUG) echo "(debug) Starting\n";
+                    if ( isset($this->requests[$id]) ) {
+                        unset($this->requests[$id]);
                     }
+                    $this->requests[$id] = $socket;
+                    $thread->synchronized(function($job, $app, $socket) {
+                        $job->app = $app;
+                        $job->socket = $socket;
+                        $job->notify();
+                    }, $thread, $this->app, $socket);
+                    return true;
+                } elseif( !$thread->isRunning() ) {
+                    unset($this->requests[$id]);
+                    unset($this->threads[$id]);
+                    $this->threads[$id] =  new ThreadRunner();
+                    /*if (DEBUG) {
+                      echo "(debug) Reload thread\n";*/
+                      echo '>> MAIN MEMORY   : ' . memory_get_usage(true) . " @ $id\n";
+                    // }
                 }
             }
             $try ++;
             usleep(10000); // wait 10ms (threads are all working)
         }
         // request is timed out (2 sec)
+        if (DEBUG) {
+          echo '> Request timeout' . "\n";
+        }
         $request = new Request($socket);
         $request->reply(
            "HTTP/1.0 500 Internal Server Error\r\n"
@@ -90,21 +111,18 @@ class Server {
            . "Connection: close\n\n"
         )->close();
         unset($request);
+        unset($socket);
         return false;
     }
 }
 
-/**
- * Thread helper for running the request with a clean way
- */
-class ThreadRunner extends \Thread {
-    public $socket;
+class ThreadRunner extends \Thread
+{
     public $app;
-    /**
-     * Initialize the thread with a callback
-     */
-    public function __construct($app) {
-        $this->app = $app;
+    public $socket;
+    public $invoke;
+    
+    public function __construct() {
         $this->start();
     }
     /**
@@ -112,11 +130,10 @@ class ThreadRunner extends \Thread {
      * @return void
      */
     public function run() {
-        while(true) {
-            if (DEBUG) echo "(debug) Thread is available\n";
+        while($this->invoke < MAX_INVOKE) {
             $this->wait();
-            if($this->socket != null) {
-                gc_enable();
+            if (DEBUG) echo "(debug) Job is loaded\n";
+            if(is_resource($this->socket)) {
                 if (DEBUG) echo "(debug) Processing\n";
                 try {
                     $request = new Request($this->socket);
@@ -125,34 +142,17 @@ class ThreadRunner extends \Thread {
                 } catch(\Exception $ex) {
                     echo "> $ex\n";
                 }
+                if (DEBUG) echo "(debug) Finished\n";
+                if ( !empty($this->socket) ) {
+                  stream_socket_shutdown($this->socket, STREAM_SHUT_RDWR);
+                  unset($this->socket);
+                }
                 unset($request);
                 unset($response);
-                gc_collect_cycles();
             }
+            $this->invoke++;
             usleep(1000);
         }
-    }
-    /**
-     * Receives a new request
-     * @return boolean
-     */
-    public function receive( $socket ) {
-        if ( $this->isWaiting() ) {
-            return $this->synchronized(function($thread, $socket){
-                if (DEBUG) echo "(debug) Starting\n";
-                $thread->socket = $socket;
-                return $thread->notify();
-            }, $this, $socket);
-        } else {
-            return false;
-        }
+        echo '>> THREAD MEMORY : ' . memory_get_usage(true) . " @ ".$this->getThreadId()."\n";
     }
 }
-
-/**
- * Registering a non blocking events
- */
-Server::$events = event_base_new();
-register_shutdown_function(function() {
-    event_base_loop(Server::$events);
-});
