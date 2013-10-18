@@ -1,0 +1,19 @@
+{
+    "current": "dev",
+    "env": {
+        "default": {
+            "port": 80,
+            "host": "0.0.0.0",
+            "debug": false,
+            "verbose": false,
+            "threads": 100,
+            "max_invoke": 100
+        },
+        "dev": {
+            "port": 8001,
+            "host": "127.0.0.1",
+            "debug": true,
+            "verbose": true
+        }
+    }
+}

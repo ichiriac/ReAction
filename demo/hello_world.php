@@ -1,8 +1,10 @@
 <?php
+require_once(__DIR__ . '/../react.php');
+use react\console;
+use react\process;
 
-//define('DEBUG', true);
-define('MAX_THREADS', 50);
-require_once(__DIR__ . '/../src/http/Server.php');
+$http = react('http');
+$port = process::$env->port;
 
 class app {
     public function request($req, $rep) {
@@ -14,9 +16,10 @@ class app {
         $rep->end('Hello World');
     }
 }
-$server = new \http\Server(
-    new app()
-);
-$server->listen(8001, '127.0.0.1');
 
-echo "(i) Server is running at 8001\n";
+$http
+    ->createServer(new app())
+    ->listen($port, '127.0.0.1')
+;
+
+console::log("Server is running at $port");
