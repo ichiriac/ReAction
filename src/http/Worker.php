@@ -2,48 +2,45 @@
 namespace react\http;
 use react\console;
 use react\process;
+use react\core\Thread;
 
-class Worker extends \Thread {
-    public $app;
+class Worker extends Thread {
     public $request;
     public $invoke;
-    /**
-     * Initialize the worker
-     */
-    public function __construct() {
-        $this->start();
+    public $wait;
+    /** closing the thread **/
+    public function close() {
+        $this->wait = false;
     }
     /**
      * The main thread function
-     * @return void
      */
-    public function run() {
-        return $this->synchronized(function($worker) {
-            $worker->wait();
-            process::start();
-            while($this->invoke < process::$env->max_invoke) {
-                console::trace('worker@' . $this->getThreadId() . ' is ready');
-                $this->synchronized(function($worker) {
-                    $worker->wait();
-                    if($worker->request) {
-                        console::trace("job process...");
-                        try {
-                            $worker->app->request(
-                                $worker->request
-                                , new Response($worker->request)
-                            );
-                        } catch(\Exception $ex) {
-                            console::warn($ex->__toString());
-                        }
-                        console::trace("job finished");
+    public function work() {
+        $this->wait = true;
+        while($this->wait) {
+            if ($this->synchronized(function($worker) {
+                if (!$worker->wait()) return false;
+                if($worker->request) {
+                    console::trace("job process...");
+                    try {
+                        $worker->app->request(
+                            $worker->request
+                            , new Response($worker->request)
+                        );
+                    } catch(\Exception $ex) {
+                        console::warn($ex->__toString());
+                        return false;
                     }
-                    $worker->invoke++;
-                }, $this);
-                usleep(1000);
+                    console::trace("job finished");
+                }
+                return true;
+            }, $this)) {
+                $this->invoke++;
             }
-            console::debug(
-                '>> THREAD MEMORY : ' . memory_get_usage(true) . " @ ".$this->getThreadId()
-            );
-        }, $this);
+            if ( $this->wait ) {
+                $this->wait = $this->invoke < process::$env->max_invoke;
+            }
+            usleep(1000);
+        }
     }
 }
