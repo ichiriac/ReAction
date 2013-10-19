@@ -1,4 +1,4 @@
-php_http
+ReAction
 ========
 
-An http implementation based on NodeJS
+developpement still in progress :)
