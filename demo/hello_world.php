@@ -1,12 +1,12 @@
 <?php
-require_once(__DIR__ . '/../react.php');
+require_once(__DIR__ . '/../src/react.php');
 use react\console;
 use react\process;
 
 $http = react('http');
 $port = process::$env->port;
 
-class app {
+class app extends react\app {
     public function request($req, $rep) {
         $rep->writeHead(
             200, array(
@@ -22,4 +22,4 @@ $http
     ->listen($port, '127.0.0.1')
 ;
 
-console::log("Server is running at $port");
+console::info("Server is running at $port");
