@@ -1,158 +1,137 @@
 <?php
-namespace http;
-require_once __DIR__ . '/Request.php';
-require_once __DIR__ . '/Response.php';
-defined('MAX_THREADS') or define('MAX_THREADS', 100);
-defined('MAX_INVOKE') or define('MAX_INVOKE', 100);
-defined('DEBUG') or define('DEBUG', false);
+namespace react\http;
+
+use react\console;
+use react\process;
+
 /**
  * Defines the server class
  */
-class Server {
-    public static $events;
-    private $port;
-    private $hostname;
-    private $app;
-    private $socket;
-    private $requests = array();
-    private $threads = array();
+class Server extends \Thread {
+    public $port;
+    public $hostname;
+    public $app;
+    public $ev;
+    public $socket;
+    public $socket_ev;
+    public $requests;
+    public $workers;
+
     /**
      * Initialize a new HTTP server, yeah !
      */
     public function __construct($app) {
+        process::$servers[] = $this;
         $this->app = $app;
-        $server = $this;
-        register_shutdown_function(function() use($server) {
-          $server->run();
-        });
     }
     
-    /** @trick **/
+    /**
+     * The main server loop
+     */
     public function run() {
-        $this->threads = array();
-        for($i = 0; $i < MAX_THREADS; $i++) {
-            $this->threads[] = new ThreadRunner();
-        }
+        process::start();
+        $this->requests = new \SplObjectStorage();
+        $this->workers = array();
         $dsn = 'tcp://'.$this->hostname.':'.$this->port;
-        $this->socket = stream_socket_server($dsn);
+        for($i = 0; $i < process::$env->threads; $i++) {
+            // initialize the thread state
+            $w = new Worker();
+            $w->synchronized(function($worker, $app) {
+                $worker->app = $app;
+                $worker->notify();
+            }, $w, $this->app);
+            var_dump('new worker :', $i, process::$env->threads);
+            $this->workers[] = $w; 
+        }
+        $this->socket = stream_socket_server($dsn, $errno, $errstr);
         if ( !$this->socket ) {
             throw new \Exception(
-                "Could not start server at $dsn\nCaused by : $errstr\n"
+                "Could not start server at $dsn\nCause by : $errstr\n"
             );
         }
-        echo "(i) Starting the server ($dsn)...\n";
-        while(true) {
-            if(($client = stream_socket_accept($this->socket)) !== false) {
-                $this->accept($client);
-            }
-            usleep(1000);
-        }
+        stream_set_blocking($this->socket, 0);
+        $this->ev = event_base_new();
+        $this->socket_ev =event_new();
+        event_set(
+            $this->socket_ev
+            , $this->socket
+            , EV_READ | EV_PERSIST
+            , array($this, '_accept')
+            , $this->ev
+        );
+        event_base_set($this->socket_ev,$this->ev);
+        event_add($this->socket_ev);
+        event_base_loop($this->ev);
     }
     /**
-     * Starts to listen
+     * Prepare to listen
      */
     public function listen($port = '80', $hostname = '0.0.0.0') {
         $this->port = $port;
         $this->hostname = $hostname;
+        $this->start();
         return $this;
     }
     /**
      * Closing all connections
      */
     public function close() {
-        echo "(i) Closing the server...\n";
+        console::log('Closing the server...');
         stream_socket_shutdown($this->socket, STREAM_SHUT_RDWR);
-        $this->socket = null;
-        event_free($this->event);
-        event_del($this->event);
-        $this->event = null;
+        event_free($this->socket_ev);
+        event_del($this->socket_ev);
+        event_base_loopexit($this->ev);
+        event_base_free($this->ev);
+        unset(
+            $this->socket
+            , $this->socket_ev
+            , $this->ev
+        );
+        $this->shutdown();
     }
     /**
-     * Intercepts a new request
+     * The request is ready to be processed
      */
-    private function accept($socket) {
-        if (DEBUG) echo "(debug) Receive request\n";
+    public function _process( $client ) {
         $try = 0;
         while($try < 200) {
-            foreach($this->threads as $id => &$thread) {
-                if ( $thread->isWaiting() ) {
-                    if (DEBUG) echo "(debug) Starting\n";
-                    if ( isset($this->requests[$id]) ) {
-                        unset($this->requests[$id]);
-                    }
-                    $this->requests[$id] = $socket;
-                    $thread->synchronized(function($job, $app, $socket) {
+            foreach($this->workers as $id => $worker) {
+                if ( $worker->isWaiting() ) {
+                    $client->worker = $id;
+                    $client->request->socket = $client->socket;
+                    $worker->synchronized(function($job, $app, $request) {
                         $job->app = $app;
-                        $job->socket = $socket;
+                        $job->request = $request;
                         $job->notify();
-                    }, $thread, $this->app, $socket);
+                    }, $worker, $this->app, $client->request);
                     return true;
-                } elseif( !$thread->isRunning() ) {
-                    unset($this->requests[$id]);
-                    unset($this->threads[$id]);
-                    $this->threads[$id] =  new ThreadRunner();
-                    /*if (DEBUG) {
-                      echo "(debug) Reload thread\n";*/
-                      echo '>> MAIN MEMORY   : ' . memory_get_usage(true) . " @ $id\n";
-                    // }
+                } elseif( !$worker->isRunning() ) {
+                    unset($this->workers[$id]);
+                    $this->workers[$id] = new Worker();
+                    console::debug(
+                        '>> MAIN MEMORY   : ' . memory_get_usage(true) . '@' . $id
+                    );
                 }
             }
             $try ++;
             usleep(10000); // wait 10ms (threads are all working)
         }
         // request is timed out (2 sec)
-        if (DEBUG) {
-          echo '> Request timeout' . "\n";
-        }
-        $request = new Request($socket);
-        $request->reply(
+        console::warn('Request timeout');
+        $client->request->reply(
            "HTTP/1.0 500 Internal Server Error\r\n"
            . "X-Reason: Server is busy\n"
            . "Connection: close\n\n"
         )->close();
-        unset($request);
-        unset($socket);
         return false;
+    }
+    /**
+     * Intercepts a new request
+     */
+    public function _accept() {
+        $this->requests->attach(
+            new Client($this)
+        );
     }
 }
 
-class ThreadRunner extends \Thread
-{
-    public $app;
-    public $socket;
-    public $invoke;
-    
-    public function __construct() {
-        $this->start();
-    }
-    /**
-     * The main thread function
-     * @return void
-     */
-    public function run() {
-        while($this->invoke < MAX_INVOKE) {
-            $this->wait();
-            if (DEBUG) echo "(debug) Job is loaded\n";
-            if(is_resource($this->socket)) {
-                if (DEBUG) echo "(debug) Processing\n";
-                try {
-                    $request = new Request($this->socket);
-                    $response = new Response($request);
-                    $this->app->request($request, $response);
-                } catch(\Exception $ex) {
-                    echo "> $ex\n";
-                }
-                if (DEBUG) echo "(debug) Finished\n";
-                if ( !empty($this->socket) ) {
-                  stream_socket_shutdown($this->socket, STREAM_SHUT_RDWR);
-                  unset($this->socket);
-                }
-                unset($request);
-                unset($response);
-            }
-            $this->invoke++;
-            usleep(1000);
-        }
-        echo '>> THREAD MEMORY : ' . memory_get_usage(true) . " @ ".$this->getThreadId()."\n";
-    }
-}

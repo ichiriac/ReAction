@@ -1,28 +1,17 @@
 <?php
-namespace http;
+namespace react\http;
+use react\console;
 
 class Request {
-    private $socket;
-    private $buffer;
     private $state = 0;
+    public $socket;
     public $method;
     public $url;
     public $headers = array();
     public $get = array();
     public $post = array();
     public $cookies = array();
-    public function __construct($socket) {
-        $this->socket = $socket;
-        stream_set_blocking($this->socket, 1);
-        $this->_read();
-    }
-    private function _read() {
-        $buffer = null;
-        while ($read = fread($this->socket, 1024)) {
-            $buffer .= $read;
-            if ( strpos($buffer, "\r\n\r\n") !== false ) break;
-        }
-        if (DEBUG) echo "(debug) Receive data :\n-->>$buffer<<--\n\n";
+    private function _read($buffer) {
         $data = explode("\r\n", $buffer);
         // reading the request header
         if ( empty($this->state) ) {
@@ -81,13 +70,14 @@ class Request {
         // reading the raw data
         if ( $this->state === 3 ) {
             if ( $this->method === 'GET' ) {
-                return;
+                return true;
             }
             // @todo should implement POST & MIME
         }
+        return false;
     }
     public function reply($message) {
-        if (DEBUG) echo "(debug) Sending :\n-->>$message<<--\n\n";
+        console::trace("-->>$message<<--");
         if (!empty($this->socket) && !feof($this->socket)) {
           if ( !stream_socket_sendto($this->socket, $message) ) {
             $this->close();
@@ -95,13 +85,9 @@ class Request {
         }
         return $this;
     }
-    public function _error($buffer, $error) {
-        echo "> Error : $error\n";
-        $this->close();
-    }
     public function close() {
         if ( !empty($this->socket) ) {
-            if (DEBUG) echo "(debug) Free request\n";
+            console::debug('free request');
             stream_socket_shutdown($this->socket, STREAM_SHUT_RDWR);
             $this->socket = null;
         }

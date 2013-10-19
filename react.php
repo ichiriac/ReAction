@@ -4,6 +4,9 @@ namespace react {
         public static function log($msg) {
             echo '[log]   ' . $msg . "\n";
         }
+        public static function info($msg) {
+            echo '[info]  ' . $msg . "\n";
+        }
         public static function trace($msg) {
             echo '[trace] ' . $msg . "\n";
         }
@@ -85,15 +88,37 @@ namespace react {
     }
     class process {
         public static $wait;
-        public static $events;
+        public static $servers = array();
         public static $config;
         public static $env;
         public static function start() {
-            if ( self::$wait ) throw new \Exception(
+            if ( self::$wait && !empty(self::$env) ) throw new \Exception(
                 "The current process is already started"
             );
             self::$wait = true;
-            self::$events = event_base_new();
+            /** light autoload system **/
+            spl_autoload_register(function($class) {
+                if (substr_compare($class, 'react\\', 0, 6) === 0) {
+                    require_once( __DIR__ . '/src/' . strtr(substr($class, 6), '\\', '/') . '.php');
+                    return true;
+                } else return false;
+            }, true);
+            /** catch errors **/
+            $errorManager = function($error, $desc = null) {
+                if ( !empty($error) ) {
+                    if ( $error instanceof \Exception) {
+                        console::error($error->__toString());
+                        process::stop(2);
+                    } else {
+                        console::error($desc);
+                        debug_print_backtrace();
+                    }
+                }
+                return true;
+            };
+            set_error_handler($errorManager, E_ALL);
+            set_exception_handler($errorManager);
+            /** loading the env conf **/
             if (file_exists('configuration.json')) {
                 self::$config = new json(
                     file_get_contents('configuration.json')
@@ -109,7 +134,6 @@ namespace react {
         public function stop($code = 0) {
             if ( self::$wait ) {
                 self::$wait = false;
-                event_base_loopexit(self::$events);
             }
             console::log('Program exits with code ' . $code);
             exit($code);
@@ -119,28 +143,6 @@ namespace react {
 namespace {
     use react\console;
     use react\process;
-    /** light autoload system **/
-    spl_autoload_register(function($class) {
-        if (substr_compare($class, 'react\\', 0, 6) === 0) {
-            require_once( __DIR__ . '/src/' . strtr(substr($class, 6), '\\', '/') . '.php');
-            return true;
-        } else return false;
-    }, true);
-    /** catch errors **/
-    $errorManager = function($error, $desc = null) {
-        if ( !empty($error) ) {
-            if ( $error instanceof \Exception) {
-                console::error($error->__toString());
-                process::stop(2);
-            } else {
-                console::error($desc);
-                debug_print_backtrace();
-            }
-        }
-        return true;
-    };
-    set_error_handler($errorManager, E_ALL);
-    set_exception_handler($errorManager);
     /** test compatibility **/
     if (!extension_loaded('libevent')) {
         console::error('The [libevent] extension is *REQUIRED*');
@@ -165,8 +167,18 @@ namespace {
     /** run servers **/
     register_shutdown_function(function() {
         if ( process::$wait ) {
-            console::log('Starting the server');
-            event_base_loop(process::$events);
+            console::info('Starting the server');
+            while(process::$wait) {
+                foreach(process::$servers as $id => $server) {
+                    if ($server && !$server->isRunning()) {
+                        $server->join();
+                        unset(process::$servers[$id]);
+                    }
+                }
+                if (empty(process::$servers)) break;
+                sleep(1);
+            }
+            console::info('Process is stopped');
         }
     });
 }
