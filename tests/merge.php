@@ -7,17 +7,17 @@ class Job extends Thread {
         usleep(10000);
         var_dump($this->foo); // bar
         usleep(10000);
-        $this->foo = 'baz';
+        $this->foo = array('baz');
         usleep(10000);
-        $this->foo = 'buz';
+        $this->foo = array('buz');
     }
 }
 
 $j= new Job();
-$j->foo = 'foo';
+$j->foo = array('foo');
 $j->start();
-$j->foo = 'bar';
-usleep(20000);
+$j->foo = array('bar');
+usleep(25000);
 var_dump($j->foo); // baz
 $j->join();
 var_dump($j->foo); // buz
